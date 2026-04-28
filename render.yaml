@@ -3,7 +3,7 @@ services:
     name: huydebug-spa
     env: node
     plan: starter
-    buildCommand: npm ci && npm run build
+    buildCommand: npm ci --include=dev && npm run build
     startCommand: node server/server.js
     envVars:
       - key: NODE_ENV
