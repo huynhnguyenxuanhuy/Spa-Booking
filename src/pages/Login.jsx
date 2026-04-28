@@ -3,18 +3,13 @@ import { useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 
-const channelCopy = {
-  email: 'email',
-  phone: 'số điện thoại',
-}
-
 const readableError = (err, fallback) =>
   err.response?.data?.message ||
   (err.message === 'Network Error' ? 'Không kết nối được máy chủ. Vui lòng kiểm tra server rồi thử lại.' : err.message) ||
   fallback
 
 export default function Login() {
-  const { login, loginCustomerWithOtp, registerCustomer, requestOtp } = useAuth()
+  const { login, loginCustomerWithOtp, registerCustomer } = useAuth()
   const navigate = useNavigate()
   const location = useLocation()
   const redirectTo = location.state?.from?.pathname || '/admin'
@@ -22,15 +17,12 @@ export default function Login() {
   const [tab, setTab] = useState('customer')
   const [customerMode, setCustomerMode] = useState('login')
   const [adminForm, setAdminForm] = useState({ email: '', password: '' })
-  const [loginForm, setLoginForm] = useState({ contact: '', channel: 'email', otp: '' })
+  const [loginForm, setLoginForm] = useState({ contact: '' })
   const [registerForm, setRegisterForm] = useState({
     name: '',
     email: '',
     phone: '',
-    channel: 'email',
-    otp: '',
   })
-  const [challenge, setChallenge] = useState(null)
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
@@ -41,70 +33,18 @@ export default function Login() {
     setNotice('')
   }
 
-  const contactForRegister = registerForm.channel === 'phone' ? registerForm.phone : registerForm.email
-
-  const requestLoginOtp = async () => {
+  const submitCustomerLogin = async (e) => {
+    e.preventDefault()
     clearFeedback()
     if (!loginForm.contact.trim()) {
       setError('Vui lòng nhập email hoặc số điện thoại.')
       return
     }
-    setLoadingText('Đang gửi mã OTP...')
-    setLoading(true)
-    try {
-      const res = await requestOtp({
-        contact: loginForm.contact,
-        channel: loginForm.channel,
-        purpose: 'login',
-      })
-      setChallenge({ ...res, purpose: 'login' })
-      setNotice(res.message)
-    } catch (err) {
-      setError(readableError(err, 'Không gửi được OTP'))
-    } finally {
-      setLoading(false)
-      setLoadingText('')
-    }
-  }
-
-  const requestRegisterOtp = async () => {
-    clearFeedback()
-    if (!registerForm.name.trim() || !registerForm.email.trim() || !registerForm.phone.trim()) {
-      setError('Vui lòng nhập đầy đủ họ tên, email và số điện thoại.')
-      return
-    }
-    setLoadingText('Đang gửi mã OTP...')
-    setLoading(true)
-    try {
-      const res = await requestOtp({
-        contact: contactForRegister,
-        channel: registerForm.channel,
-        purpose: 'register',
-      })
-      setChallenge({ ...res, purpose: 'register' })
-      setNotice(res.message)
-    } catch (err) {
-      setError(readableError(err, 'Không gửi được OTP'))
-    } finally {
-      setLoading(false)
-      setLoadingText('')
-    }
-  }
-
-  const submitCustomerLogin = async (e) => {
-    e.preventDefault()
-    clearFeedback()
-    if (!challenge?.challengeId) {
-      setError('Vui lòng nhận mã OTP trước.')
-      return
-    }
-    setLoadingText('Đang xác thực OTP...')
+    setLoadingText('Đang đăng nhập...')
     setLoading(true)
     try {
       await loginCustomerWithOtp({
         contact: loginForm.contact,
-        challengeId: challenge.challengeId,
-        otp: loginForm.otp,
       })
       navigate('/', { replace: true })
     } catch (err) {
@@ -118,17 +58,14 @@ export default function Login() {
   const submitCustomerRegister = async (e) => {
     e.preventDefault()
     clearFeedback()
-    if (!challenge?.challengeId) {
-      setError('Vui lòng nhận mã OTP trước.')
+    if (!registerForm.name.trim() || !registerForm.email.trim() || !registerForm.phone.trim()) {
+      setError('Vui lòng nhập đầy đủ họ tên, email và số điện thoại.')
       return
     }
     setLoadingText('Đang tạo tài khoản...')
     setLoading(true)
     try {
-      await registerCustomer({
-        ...registerForm,
-        challengeId: challenge.challengeId,
-      })
+      await registerCustomer(registerForm)
       navigate('/', { replace: true })
     } catch (err) {
       setError(readableError(err, 'Đăng ký thất bại'))
@@ -161,13 +98,11 @@ export default function Login() {
 
   const switchCustomerMode = (mode) => {
     setCustomerMode(mode)
-    setChallenge(null)
     clearFeedback()
   }
 
   const switchTab = (nextTab) => {
     setTab(nextTab)
-    setChallenge(null)
     clearFeedback()
   }
 
@@ -203,7 +138,7 @@ export default function Login() {
           <h3>{tab === 'customer' ? 'Khách hàng HuyDeBug Spa' : 'Bảng điều khiển quản trị'}</h3>
           <p className="sub">
             {tab === 'customer'
-              ? 'Đăng nhập hoặc tạo tài khoản bằng mã OTP bảo mật.'
+              ? 'Đăng nhập hoặc tạo tài khoản nhanh để đặt lịch và lưu thông tin.'
               : 'Dành riêng cho nhân sự được cấp quyền quản trị.'}
           </p>
 
@@ -243,35 +178,8 @@ export default function Login() {
                     />
                   </div>
 
-                  <div className="field">
-                    <label>Nhận OTP qua</label>
-                    <select
-                      value={loginForm.channel}
-                      onChange={(e) => setLoginForm({ ...loginForm, channel: e.target.value })}
-                    >
-                      <option value="email">Email</option>
-                      <option value="phone">Số điện thoại</option>
-                    </select>
-                  </div>
-
-                  <button type="button" className="btn btn-ghost btn-block" disabled={loading} onClick={requestLoginOtp}>
-                    {loading ? 'Đang gửi...' : `Gửi OTP tới ${channelCopy[loginForm.channel]}`}
-                  </button>
-
-                  <div className="field">
-                    <label>Mã OTP</label>
-                    <input
-                      value={loginForm.otp}
-                      onChange={(e) => setLoginForm({ ...loginForm, otp: e.target.value.replace(/\D/g, '').slice(0, 6) })}
-                      placeholder="6 chữ số"
-                      inputMode="numeric"
-                      autoComplete="one-time-code"
-                      required
-                    />
-                  </div>
-
                   <button type="submit" className="btn btn-primary btn-block" disabled={loading}>
-                    {loading ? 'Đang xác thực...' : 'Đăng nhập'}
+                    {loading ? 'Đang đăng nhập...' : 'Đăng nhập'}
                   </button>
                 </form>
               ) : (
@@ -309,33 +217,6 @@ export default function Login() {
                         required
                       />
                     </div>
-                  </div>
-
-                  <div className="field">
-                    <label>Nhận OTP qua</label>
-                    <select
-                      value={registerForm.channel}
-                      onChange={(e) => setRegisterForm({ ...registerForm, channel: e.target.value })}
-                    >
-                      <option value="email">Email</option>
-                      <option value="phone">Số điện thoại</option>
-                    </select>
-                  </div>
-
-                  <button type="button" className="btn btn-ghost btn-block" disabled={loading} onClick={requestRegisterOtp}>
-                    {loading ? 'Đang gửi...' : `Gửi OTP tới ${channelCopy[registerForm.channel]}`}
-                  </button>
-
-                  <div className="field">
-                    <label>Mã OTP</label>
-                    <input
-                      value={registerForm.otp}
-                      onChange={(e) => setRegisterForm({ ...registerForm, otp: e.target.value.replace(/\D/g, '').slice(0, 6) })}
-                      placeholder="6 chữ số"
-                      inputMode="numeric"
-                      autoComplete="one-time-code"
-                      required
-                    />
                   </div>
 
                   <button type="submit" className="btn btn-primary btn-block" disabled={loading}>

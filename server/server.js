@@ -337,7 +337,7 @@ async function handleApi(req, res, url) {
     const body = await readBody(req)
     const db = readDb()
     const contact = body.channel === 'phone' ? body.phone : body.email
-    if (!verifyOtp(db, { challengeId: body.challengeId, contact, code: body.otp, purpose: 'register' })) {
+    if (!body.otpDisabled && !verifyOtp(db, { challengeId: body.challengeId, contact, code: body.otp, purpose: 'register' })) {
       writeDb(db)
       return sendJson(res, 422, { message: 'Mã OTP không đúng hoặc đã hết hạn' })
     }
@@ -367,7 +367,7 @@ async function handleApi(req, res, url) {
     const body = await readBody(req)
     const db = readDb()
     const user = findUserByContact(db, body.contact)
-    const valid = verifyOtp(db, { challengeId: body.challengeId, contact: body.contact, code: body.otp, purpose: 'login' })
+    const valid = body.otpDisabled || verifyOtp(db, { challengeId: body.challengeId, contact: body.contact, code: body.otp, purpose: 'login' })
     if (!valid || !user || user.role !== 'customer' || user.status === 'disabled') {
       writeDb(db)
       return sendJson(res, 401, { message: 'OTP không hợp lệ hoặc tài khoản chưa tồn tại' })
