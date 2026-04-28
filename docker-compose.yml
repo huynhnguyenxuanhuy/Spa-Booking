@@ -1,0 +1,13 @@
+services:
+  spa:
+    build: .
+    container_name: huydebug-spa
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      NODE_ENV: production
+      PORT: 8080
+      TOKEN_SECRET: ${TOKEN_SECRET:-change-this-secret-before-production}
+    volumes:
+      - ./server/storage:/app/server/storage
