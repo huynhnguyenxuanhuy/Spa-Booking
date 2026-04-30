@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "build": "node build.js",
+    "postinstall": "node build.js",
     "start": "node server.js"
   },
   "engines": {
