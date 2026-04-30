@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>HuyDebug</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/styles.css?v=host-controls-1" />
+  </head>
+  <body>
+    <main id="app"></main>
+    <template id="videoTileTemplate">
+      <article class="video-tile">
+        <video autoplay playsinline></video>
+        <div class="tile-shade"></div>
+        <div class="avatar" aria-hidden="true"></div>
+        <div class="tile-meta">
+          <span class="tile-name"></span>
+          <span class="tile-badge"></span>
+        </div>
+      </article>
+    </template>
+    <script src="/app.js?v=host-controls-1" type="module"></script>
+  </body>
+</html>

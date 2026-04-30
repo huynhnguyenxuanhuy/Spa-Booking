@@ -1,0 +1,13 @@
+{
+  "name": "huydebug",
+  "version": "1.0.0",
+  "description": "HuyDebug video meeting app with WebRTC calls and a tiny Node signaling server.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
