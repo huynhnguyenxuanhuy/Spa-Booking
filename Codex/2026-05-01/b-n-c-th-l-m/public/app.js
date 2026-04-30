@@ -6,6 +6,7 @@ const state = {
   name: localStorage.getItem("huydebug:name") || "",
   avatar: localStorage.getItem("huydebug:avatar") || "",
   peerId: localStorage.getItem("huydebug:peerId") || crypto.randomUUID(),
+  peerToken: "",
   localStream: null,
   screenStream: null,
   lastEventId: 0,
@@ -424,6 +425,7 @@ async function startRoom() {
       method: "POST",
       body: JSON.stringify({ peerId: state.peerId, name: state.name || "HuyDebugger", avatar: state.avatar })
     });
+    state.peerToken = joined.token || "";
     state.hostId = joined.room?.hostId || "";
     state.isHost = state.hostId === state.peerId;
     state.roomLocked = Boolean(joined.room?.locked);
@@ -515,7 +517,7 @@ function wireControls() {
 
   document.querySelector("#screenBtn").addEventListener("click", toggleScreenShare);
   window.addEventListener("beforeunload", () => {
-    navigator.sendBeacon?.(`/api/rooms/${state.roomId}/leave`, JSON.stringify({ peerId: state.peerId }));
+    navigator.sendBeacon?.(`/api/rooms/${state.roomId}/leave`, JSON.stringify({ peerId: state.peerId, token: state.peerToken }));
   });
 }
 
@@ -535,7 +537,7 @@ async function sendHostControl(action, target = "") {
   try {
     const result = await request(`/api/rooms/${state.roomId}/control`, {
       method: "POST",
-      body: JSON.stringify({ from: state.peerId, action, target })
+      body: JSON.stringify({ from: state.peerId, token: state.peerToken, action, target })
     });
     if (result.room) {
       state.hostId = result.room.hostId;
@@ -627,7 +629,7 @@ async function negotiateOffer(peerId, pc) {
 async function sendSignal(to, signal) {
   await request(`/api/rooms/${state.roomId}/signal`, {
     method: "POST",
-    body: JSON.stringify({ from: state.peerId, to, signal })
+    body: JSON.stringify({ from: state.peerId, token: state.peerToken, to, signal })
   });
 }
 
@@ -673,7 +675,9 @@ function startPolling() {
   const poll = async () => {
     if (!state.polling) return;
     try {
-      const data = await request(`/api/rooms/${state.roomId}/events?peerId=${encodeURIComponent(state.peerId)}&after=${state.lastEventId}`);
+      const data = await request(`/api/rooms/${state.roomId}/events?peerId=${encodeURIComponent(state.peerId)}&after=${state.lastEventId}`, {
+        headers: { "x-peer-token": state.peerToken }
+      });
       state.lastEventId = data.lastEventId;
       for (const event of data.events) {
         if (event.type === "peer-joined") {
@@ -790,7 +794,7 @@ function startHeartbeat() {
   window.setInterval(() => {
     request(`/api/rooms/${state.roomId}/heartbeat`, {
       method: "POST",
-      body: JSON.stringify({ peerId: state.peerId, name: state.name || "HuyDebugger", avatar: state.avatar })
+      body: JSON.stringify({ peerId: state.peerId, token: state.peerToken, name: state.name || "HuyDebugger", avatar: state.avatar })
     }).catch(() => {});
   }, 10_000);
 }
@@ -815,7 +819,7 @@ async function sendChatMessage(event) {
   try {
     await request(`/api/rooms/${state.roomId}/chat`, {
       method: "POST",
-      body: JSON.stringify({ from: state.peerId, text })
+      body: JSON.stringify({ from: state.peerId, token: state.peerToken, text })
     });
   } catch (error) {
     toast("Không gửi được tin nhắn.");
@@ -858,7 +862,7 @@ async function leaveRoom() {
   state.peerConnections.forEach((pc) => pc.close());
   await request(`/api/rooms/${state.roomId}/leave`, {
     method: "POST",
-    body: JSON.stringify({ peerId: state.peerId })
+    body: JSON.stringify({ peerId: state.peerId, token: state.peerToken })
   }).catch(() => {});
 }
 

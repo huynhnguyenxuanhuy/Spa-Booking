@@ -12,6 +12,14 @@ HuyDebug là một MVP gọi video kiểu Google Meet/Zoom, dùng WebRTC để g
 - Tải ảnh đại diện, lưu trong trình duyệt và hiển thị trong phòng.
 - Host controls: khóa/mở phòng, duyệt người chờ, kick người tham gia, yêu cầu tắt mic/camera.
 
+## Bảo mật
+
+- Production phục vụ asset từ `public-dist` đã minify bằng `npm run build`.
+- API dùng peer token bí mật sau khi join phòng; chat, signaling, heartbeat và host controls đều yêu cầu token.
+- Room ID dùng 12 ký tự hex ngẫu nhiên để khó đoán hơn.
+- Server bật CSP, HSTS, X-Frame-Options, nosniff, Referrer-Policy và Permissions-Policy.
+- API có kiểm tra Origin và rate limit cơ bản để giảm spam/lạm dụng.
+
 ## Chạy local
 
 ```bash

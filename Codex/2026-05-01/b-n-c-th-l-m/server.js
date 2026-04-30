@@ -6,8 +6,11 @@ import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
-const publicDir = join(__dirname, "public");
+const publicSourceDir = join(__dirname, "public");
+const publicDistDir = join(__dirname, "public-dist");
+const publicDir = existsSync(publicDistDir) ? publicDistDir : publicSourceDir;
 const rooms = new Map();
+const rateLimits = new Map();
 let sequence = 1;
 
 const MIME_TYPES = {
@@ -23,7 +26,7 @@ const MIME_TYPES = {
 };
 
 function makeRoomId() {
-  return crypto.randomBytes(3).toString("hex").toUpperCase();
+  return crypto.randomBytes(6).toString("hex").toUpperCase();
 }
 
 function getRoom(roomId) {
@@ -53,11 +56,75 @@ function publish(room, event) {
   return entry;
 }
 
+const SECURITY_HEADERS = {
+  "content-security-policy": [
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self' https://fonts.googleapis.com",
+    "font-src 'self' https://fonts.gstatic.com data:",
+    "img-src 'self' data: blob:",
+    "media-src 'self' blob:",
+    "connect-src 'self' https: wss:",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+    "upgrade-insecure-requests"
+  ].join("; "),
+  "cross-origin-opener-policy": "same-origin",
+  "cross-origin-resource-policy": "same-origin",
+  "origin-agent-cluster": "?1",
+  "permissions-policy": "camera=(self), microphone=(self), display-capture=(self), clipboard-write=(self), geolocation=(), payment=(), usb=(), bluetooth=(), serial=()",
+  "referrer-policy": "strict-origin-when-cross-origin",
+  "strict-transport-security": "max-age=31536000; includeSubDomains",
+  "x-content-type-options": "nosniff",
+  "x-frame-options": "DENY"
+};
+
+function headers(extra = {}) {
+  return { ...SECURITY_HEADERS, ...extra };
+}
+
+function clientIp(request) {
+  const forwarded = request.headers["x-forwarded-for"];
+  if (typeof forwarded === "string" && forwarded.trim()) return forwarded.split(",")[0].trim();
+  return request.socket.remoteAddress || "unknown";
+}
+
+function rateLimit(request, response) {
+  const now = Date.now();
+  const isWrite = !["GET", "HEAD", "OPTIONS"].includes(request.method || "GET");
+  const key = `${clientIp(request)}:${isWrite ? "write" : "read"}`;
+  const max = isWrite ? 300 : 2400;
+  const windowMs = 60_000;
+  const current = rateLimits.get(key);
+  if (!current || current.resetAt <= now) {
+    rateLimits.set(key, { count: 1, resetAt: now + windowMs });
+    return false;
+  }
+  current.count += 1;
+  if (current.count > max) {
+    json(response, 429, { error: "Too many requests" });
+    return true;
+  }
+  return false;
+}
+
+function validOrigin(request) {
+  const origin = request.headers.origin;
+  if (!origin || ["GET", "HEAD", "OPTIONS"].includes(request.method || "GET")) return true;
+  try {
+    return new URL(origin).host === request.headers.host;
+  } catch {
+    return false;
+  }
+}
+
 function json(response, status, payload) {
-  response.writeHead(status, {
+  response.writeHead(status, headers({
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store"
-  });
+  }));
   response.end(JSON.stringify(payload));
 }
 
@@ -69,7 +136,11 @@ async function readJson(request) {
   let body = "";
   for await (const chunk of request) {
     body += chunk;
-    if (body.length > 1_000_000) throw new Error("Body too large");
+    if (body.length > 300_000) {
+      const error = new Error("Body too large");
+      error.statusCode = 413;
+      throw error;
+    }
   }
   return body ? JSON.parse(body) : {};
 }
@@ -114,12 +185,13 @@ function getIceServers() {
   return servers;
 }
 
-function touchPeer(room, peerId, name, avatar) {
+function touchPeer(room, peerId, name, avatar, token = "") {
   const existing = room.peers.get(peerId);
   const peer = {
     id: peerId,
     name: String(name || existing?.name || "Khach moi").slice(0, 48),
     avatar: sanitizeAvatar(avatar) || existing?.avatar || "",
+    token: existing?.token || token || crypto.randomUUID(),
     joinedAt: existing?.joinedAt || Date.now(),
     lastSeen: Date.now()
   };
@@ -134,6 +206,7 @@ function touchPending(room, peerId, name, avatar) {
     id: peerId,
     name: String(name || existing?.name || "Khach moi").slice(0, 48),
     avatar: sanitizeAvatar(avatar) || existing?.avatar || "",
+    token: existing?.token || crypto.randomUUID(),
     joinedAt: existing?.joinedAt || Date.now(),
     lastSeen: Date.now()
   };
@@ -147,8 +220,18 @@ function assignNextHost(room) {
   publish(room, { type: "host-changed", from: "system", hostId: room.hostId, room: sanitizeRoom(room) });
 }
 
-function requireHost(room, peerId, response) {
-  if (!peerId || room.hostId !== peerId || !room.peers.has(peerId)) {
+function verifyPeer(room, peerId, token) {
+  const peer = room.peers.get(peerId) || room.pending.get(peerId);
+  return Boolean(peer && token && peer.token === token);
+}
+
+function verifyActivePeer(room, peerId, token) {
+  const peer = room.peers.get(peerId);
+  return Boolean(peer && token && peer.token === token);
+}
+
+function requireHost(room, peerId, token, response) {
+  if (!peerId || room.hostId !== peerId || !verifyActivePeer(room, peerId, token)) {
     json(response, 403, { error: "Only host can do this" });
     return false;
   }
@@ -184,22 +267,28 @@ async function serveStatic(request, response) {
   const normalizedPath = normalize(pathname).replace(/^(\.\.[/\\])+/, "");
   const filePath = join(publicDir, normalizedPath);
   if (!filePath.startsWith(publicDir) || !existsSync(filePath)) {
-    response.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+    response.writeHead(404, headers({ "content-type": "text/plain; charset=utf-8" }));
     response.end("Not found");
     return;
   }
 
   const ext = extname(filePath);
   const content = await readFile(filePath);
-  response.writeHead(200, {
+  response.writeHead(200, headers({
     "content-type": MIME_TYPES[ext] || "application/octet-stream",
     "cache-control": "no-store"
-  });
+  }));
   response.end(content);
 }
 
 const server = createServer(async (request, response) => {
   try {
+    if (rateLimit(request, response)) return;
+    if (!validOrigin(request)) {
+      json(response, 403, { error: "Invalid origin" });
+      return;
+    }
+
     const requestUrl = new URL(request.url, `http://${request.headers.host}`);
     const parts = requestUrl.pathname.split("/").filter(Boolean);
 
@@ -249,6 +338,7 @@ const server = createServer(async (request, response) => {
         json(response, 202, {
           roomId: room.id,
           pending: true,
+          token: pendingPeer.token,
           self: sanitizePeer(pendingPeer),
           room: sanitizeRoom(room),
           peers: []
@@ -262,6 +352,7 @@ const server = createServer(async (request, response) => {
       json(response, 200, {
         roomId: room.id,
         pending: false,
+        token: peer.token,
         room: sanitizeRoom(room),
         self: sanitizePeer(peer),
         peers: [...room.peers.values()].filter((item) => item.id !== peerId).map(sanitizePeer)
@@ -272,6 +363,11 @@ const server = createServer(async (request, response) => {
     if (request.method === "POST" && action === "leave") {
       const body = await readJson(request);
       const peerId = String(body.peerId || "").trim();
+      const token = String(body.token || "").trim();
+      if (peerId && !verifyPeer(room, peerId, token)) {
+        json(response, 403, { error: "Invalid peer token" });
+        return;
+      }
       const peer = room.peers.get(peerId);
       if (peer) {
         room.peers.delete(peerId);
@@ -285,6 +381,11 @@ const server = createServer(async (request, response) => {
     if (request.method === "POST" && action === "heartbeat") {
       const body = await readJson(request);
       const peerId = String(body.peerId || "").trim();
+      const token = String(body.token || "").trim();
+      if (!verifyPeer(room, peerId, token)) {
+        json(response, 403, { error: "Invalid peer token" });
+        return;
+      }
       if (peerId && room.peers.has(peerId)) touchPeer(room, peerId, body.name, body.avatar);
       if (peerId && room.pending.has(peerId)) room.pending.get(peerId).lastSeen = Date.now();
       json(response, 200, { ok: true });
@@ -296,7 +397,8 @@ const server = createServer(async (request, response) => {
       const from = String(body.from || "").trim();
       const target = String(body.target || "").trim();
       const control = String(body.action || "").trim();
-      if (!requireHost(room, from, response)) return;
+      const token = String(body.token || "").trim();
+      if (!requireHost(room, from, token, response)) return;
 
       if (control === "lock" || control === "unlock") {
         room.locked = control === "lock";
@@ -312,7 +414,7 @@ const server = createServer(async (request, response) => {
           return;
         }
         room.pending.delete(target);
-        const peer = touchPeer(room, target, pendingPeer.name, pendingPeer.avatar);
+        const peer = touchPeer(room, target, pendingPeer.name, pendingPeer.avatar, pendingPeer.token);
         publish(room, {
           type: "join-approved",
           from,
@@ -368,9 +470,10 @@ const server = createServer(async (request, response) => {
     if (request.method === "POST" && action === "chat") {
       const body = await readJson(request);
       const from = String(body.from || "").trim();
+      const token = String(body.token || "").trim();
       const text = String(body.text || "").trim().slice(0, 900);
       const peer = room.peers.get(from);
-      if (!from || !peer || !text) {
+      if (!from || !peer || !text || !verifyActivePeer(room, from, token)) {
         json(response, 400, { error: "from and text are required" });
         return;
       }
@@ -389,7 +492,8 @@ const server = createServer(async (request, response) => {
       const body = await readJson(request);
       const from = String(body.from || "").trim();
       const to = String(body.to || "").trim();
-      if (!from || !to || !body.signal?.type) {
+      const token = String(body.token || "").trim();
+      if (!from || !to || !body.signal?.type || !verifyActivePeer(room, from, token)) {
         json(response, 400, { error: "from, to and signal.type are required" });
         return;
       }
@@ -401,7 +505,12 @@ const server = createServer(async (request, response) => {
 
     if (request.method === "GET" && action === "events") {
       const peerId = String(requestUrl.searchParams.get("peerId") || "").trim();
+      const token = String(request.headers["x-peer-token"] || requestUrl.searchParams.get("token") || "").trim();
       const after = Number(requestUrl.searchParams.get("after") || 0);
+      if (!verifyPeer(room, peerId, token)) {
+        json(response, 403, { error: "Invalid peer token" });
+        return;
+      }
       if (peerId && room.peers.has(peerId)) room.peers.get(peerId).lastSeen = Date.now();
       if (peerId && room.pending.has(peerId)) room.pending.get(peerId).lastSeen = Date.now();
       const events = room.events.filter((event) => {
@@ -415,7 +524,7 @@ const server = createServer(async (request, response) => {
     notFound(response);
   } catch (error) {
     console.error(error);
-    json(response, 500, { error: "Server error" });
+    json(response, error.statusCode || 500, { error: error.statusCode ? error.message : "Server error" });
   }
 });
 
