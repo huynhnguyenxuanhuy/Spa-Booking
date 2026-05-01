@@ -453,7 +453,7 @@ const server = createServer(async (request, response) => {
         return;
       }
 
-      if (control === "mute-audio" || control === "mute-video") {
+      if (["mute-audio", "mute-video", "request-audio", "request-video"].includes(control)) {
         if (!room.peers.has(target)) {
           json(response, 404, { error: "Peer not found" });
           return;

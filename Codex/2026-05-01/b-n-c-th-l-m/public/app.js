@@ -12,6 +12,7 @@ const state = {
   lastEventId: 0,
   peers: new Map(),
   peerConnections: new Map(),
+  negotiationTimers: new Map(),
   pendingIce: new Map(),
   chatMessages: [],
   pendingRequests: new Map(),
@@ -31,6 +32,9 @@ let iceServers = [
   { urls: "stun:stun.l.google.com:19302" },
   { urls: "stun:stun1.l.google.com:19302" }
 ];
+
+const AUDIO_CONSTRAINTS = { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
+const VIDEO_CONSTRAINTS = { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" };
 
 function getRoomFromPath() {
   const match = window.location.pathname.match(/^\/r\/([A-Za-z0-9-]+)/);
@@ -351,7 +355,9 @@ function renderParticipants() {
       <span class="person-live">${person.id === state.hostId ? "Host" : "Live"}</span>
       ${state.isHost && !person.self ? `
         <div class="person-actions">
+          <button type="button" data-control="request-audio" data-peer="${escapeHtml(person.id)}" title="Yêu cầu bật mic" aria-label="Yêu cầu bật mic">${icons.mic}</button>
           <button type="button" data-control="mute-audio" data-peer="${escapeHtml(person.id)}" title="Yêu cầu tắt mic">${icons.micOff}</button>
+          <button type="button" data-control="request-video" data-peer="${escapeHtml(person.id)}" title="Yêu cầu bật camera" aria-label="Yêu cầu bật camera">${icons.camera}</button>
           <button type="button" data-control="mute-video" data-peer="${escapeHtml(person.id)}" title="Yêu cầu tắt camera">${icons.cameraOff}</button>
           <button type="button" data-control="kick" data-peer="${escapeHtml(person.id)}" title="Kick khỏi phòng">${icons.x}</button>
         </div>
@@ -407,18 +413,7 @@ async function startRoom() {
   updateMeetingClock();
   window.setInterval(updateMeetingClock, 20_000);
   await loadConfig();
-  try {
-    state.localStream = await navigator.mediaDevices.getUserMedia({
-      video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" },
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
-    });
-    makeTile(state.peerId, state.name || "Bạn", state.localStream, true, state.avatar);
-  } catch (error) {
-    state.cameraEnabled = false;
-    state.micEnabled = false;
-    makeTile(state.peerId, state.name || "Bạn", null, true, state.avatar);
-    toast("Không mở được camera/mic. Bạn vẫn có thể vào phòng và cấp quyền lại trên trình duyệt.");
-  }
+  await setupInitialMedia();
 
   try {
     const joined = await request(`/api/rooms/${state.roomId}/join`, {
@@ -475,6 +470,232 @@ async function loadConfig() {
   }
 }
 
+function ensureLocalStream() {
+  if (!state.localStream) state.localStream = new MediaStream();
+  return state.localStream;
+}
+
+function getLiveLocalTrack(kind) {
+  return state.localStream?.getTracks().find((track) => track.kind === kind && track.readyState === "live") || null;
+}
+
+function mediaErrorMessage(kind, error) {
+  const label = kind === "audio" ? "mic" : "camera";
+  if (!navigator.mediaDevices?.getUserMedia) {
+    return `Trình duyệt không hỗ trợ mở ${label}, hoặc trang chưa chạy bằng HTTPS/localhost.`;
+  }
+  if (!window.isSecureContext && !["localhost", "127.0.0.1"].includes(window.location.hostname)) {
+    return `${label[0].toUpperCase()}${label.slice(1)} chỉ hoạt động trên HTTPS hoặc localhost.`;
+  }
+  if (error?.name === "NotAllowedError" || error?.name === "SecurityError") {
+    return `Trình duyệt đang chặn ${label}. Hãy cấp quyền ${label} rồi bấm lại nút.`;
+  }
+  if (error?.name === "NotFoundError" || error?.name === "OverconstrainedError") {
+    return `Không tìm thấy thiết bị ${label} phù hợp.`;
+  }
+  if (error?.name === "NotReadableError") {
+    return `${label[0].toUpperCase()}${label.slice(1)} đang được ứng dụng khác sử dụng.`;
+  }
+  return `Không mở được ${label}. Hãy kiểm tra quyền trình duyệt và thiết bị.`;
+}
+
+function updateLocalTile() {
+  const visibleStream = state.sharingScreen && state.screenStream ? state.screenStream : state.localStream;
+  makeTile(state.peerId, state.name || "Bạn", visibleStream, true, state.avatar);
+}
+
+function syncMediaButtons() {
+  const micButton = document.querySelector("#micBtn");
+  if (micButton) {
+    micButton.classList.toggle("active", state.micEnabled);
+    micButton.innerHTML = state.micEnabled ? icons.mic : icons.micOff;
+    micButton.setAttribute("aria-pressed", String(state.micEnabled));
+    micButton.title = state.micEnabled ? "Tắt mic" : "Bật mic";
+  }
+
+  const cameraButton = document.querySelector("#cameraBtn");
+  if (cameraButton) {
+    cameraButton.classList.toggle("active", state.cameraEnabled);
+    cameraButton.innerHTML = state.cameraEnabled ? icons.camera : icons.cameraOff;
+    cameraButton.setAttribute("aria-pressed", String(state.cameraEnabled));
+    cameraButton.title = state.cameraEnabled ? "Tắt camera" : "Bật camera";
+  }
+}
+
+async function setupInitialMedia() {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    state.cameraEnabled = false;
+    state.micEnabled = false;
+    updateLocalTile();
+    syncMediaButtons();
+    toast("Camera/mic cần trình duyệt hỗ trợ WebRTC và HTTPS hoặc localhost.");
+    return;
+  }
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: AUDIO_CONSTRAINTS,
+      video: VIDEO_CONSTRAINTS
+    });
+    stream.getTracks().forEach(attachLocalTrack);
+    state.micEnabled = Boolean(getLiveLocalTrack("audio"));
+    state.cameraEnabled = Boolean(getLiveLocalTrack("video"));
+    state.localStream?.getAudioTracks().forEach((track) => {
+      track.enabled = state.micEnabled;
+    });
+    state.localStream?.getVideoTracks().forEach((track) => {
+      track.enabled = state.cameraEnabled;
+    });
+    syncMediaButtons();
+    updateLocalTile();
+    return;
+  } catch {}
+
+  const [audioResult, videoResult] = await Promise.allSettled([
+    requestLocalTrack("audio"),
+    requestLocalTrack("video")
+  ]);
+
+  state.micEnabled = audioResult.status === "fulfilled";
+  state.cameraEnabled = videoResult.status === "fulfilled";
+  if (audioResult.status === "fulfilled") audioResult.value.enabled = true;
+  if (videoResult.status === "fulfilled") videoResult.value.enabled = true;
+  syncMediaButtons();
+  updateLocalTile();
+
+  if (audioResult.status === "rejected" && videoResult.status === "rejected") {
+    toast("Không mở được camera/mic. Bạn vẫn có thể vào phòng và bấm lại nút để cấp quyền.");
+    return;
+  }
+  if (audioResult.status === "rejected") toast(mediaErrorMessage("audio", audioResult.reason));
+  if (videoResult.status === "rejected") toast(mediaErrorMessage("video", videoResult.reason));
+}
+
+async function requestLocalTrack(kind) {
+  const constraints = kind === "audio"
+    ? { audio: AUDIO_CONSTRAINTS, video: false }
+    : { audio: false, video: VIDEO_CONSTRAINTS };
+  const stream = await navigator.mediaDevices.getUserMedia(constraints);
+  const track = kind === "audio" ? stream.getAudioTracks()[0] : stream.getVideoTracks()[0];
+  if (!track) throw new Error(`No ${kind} track returned`);
+  attachLocalTrack(track);
+  return track;
+}
+
+function attachLocalTrack(track) {
+  const stream = ensureLocalStream();
+  stream.getTracks()
+    .filter((existing) => existing.kind === track.kind && existing !== track)
+    .forEach((existing) => {
+      stream.removeTrack(existing);
+      if (existing.readyState !== "ended") existing.stop();
+    });
+
+  if (!stream.getTracks().includes(track)) stream.addTrack(track);
+  track.enabled = track.kind === "audio" ? state.micEnabled : state.cameraEnabled;
+  track.addEventListener("ended", () => {
+    if (!state.localStream?.getTracks().includes(track)) return;
+    state.localStream.removeTrack(track);
+    if (track.kind === "audio") state.micEnabled = false;
+    if (track.kind === "video") {
+      state.cameraEnabled = false;
+      if (!state.sharingScreen) replaceVideoTrack(null);
+    }
+    syncMediaButtons();
+    updateLocalTile();
+  }, { once: true });
+
+  syncLocalTrackWithPeerConnections(track);
+}
+
+function syncLocalTrackWithPeerConnections(track) {
+  if (track.kind === "video" && state.sharingScreen) return;
+  const stream = ensureLocalStream();
+  for (const [peerId, pc] of state.peerConnections.entries()) {
+    if (pc.connectionState === "closed") continue;
+    const sender = findSender(pc, track.kind);
+    if (sender) {
+      const hadTrack = Boolean(sender.track);
+      sender.replaceTrack(track).then(() => {
+        if (!hadTrack) queueNegotiation(peerId, pc);
+      }).catch(() => {
+        try {
+          pc.addTrack(track, stream);
+          queueNegotiation(peerId, pc);
+        } catch {}
+      });
+    } else {
+      pc.addTrack(track, stream);
+      queueNegotiation(peerId, pc);
+    }
+  }
+}
+
+function findSender(pc, kind) {
+  const activeSender = pc.getSenders().find((sender) => sender.track?.kind === kind);
+  if (activeSender) return activeSender;
+  const transceiver = pc.getTransceivers?.().find((item) => item.receiver?.track?.kind === kind);
+  return transceiver?.sender || null;
+}
+
+function queueNegotiation(peerId, pc) {
+  if (state.negotiationTimers.has(peerId) || pc.connectionState === "closed") return;
+  const timer = window.setTimeout(async () => {
+    state.negotiationTimers.delete(peerId);
+    if (pc.connectionState === "closed") return;
+    if (pc.signalingState !== "stable") {
+      queueNegotiation(peerId, pc);
+      return;
+    }
+    try {
+      await negotiateOffer(peerId, pc);
+    } catch {
+      toast("Không cập nhật được luồng media tới một người tham gia.");
+    }
+  }, 120);
+  state.negotiationTimers.set(peerId, timer);
+}
+
+async function setMicEnabled(enabled) {
+  state.micEnabled = enabled;
+  if (enabled) {
+    try {
+      const track = getLiveLocalTrack("audio") || await requestLocalTrack("audio");
+      track.enabled = true;
+    } catch (error) {
+      state.micEnabled = false;
+      toast(mediaErrorMessage("audio", error));
+    }
+  } else {
+    state.localStream?.getAudioTracks().forEach((track) => {
+      track.enabled = false;
+    });
+  }
+  syncMediaButtons();
+  updateLocalTile();
+}
+
+async function setCameraEnabled(enabled, options = {}) {
+  state.cameraEnabled = enabled;
+  if (enabled) {
+    try {
+      const track = getLiveLocalTrack("video") || await requestLocalTrack("video");
+      track.enabled = true;
+      if (!state.sharingScreen) replaceVideoTrack(track);
+    } catch (error) {
+      state.cameraEnabled = false;
+      toast(mediaErrorMessage("video", error));
+    }
+  } else {
+    if (options.stopScreen && state.sharingScreen) stopScreenShare();
+    state.localStream?.getVideoTracks().forEach((track) => {
+      track.enabled = false;
+    });
+  }
+  syncMediaButtons();
+  updateLocalTile();
+}
+
 function wireControls() {
   document.querySelector("#copyBtn").addEventListener("click", async () => {
     await navigator.clipboard.writeText(window.location.href);
@@ -494,26 +715,9 @@ function wireControls() {
     window.location.href = "/";
   });
 
-  document.querySelector("#micBtn").addEventListener("click", () => {
-    state.micEnabled = !state.micEnabled;
-    state.localStream?.getAudioTracks().forEach((track) => {
-      track.enabled = state.micEnabled;
-    });
-    const button = document.querySelector("#micBtn");
-    button.classList.toggle("active", state.micEnabled);
-    button.innerHTML = state.micEnabled ? icons.mic : icons.micOff;
-  });
+  document.querySelector("#micBtn").addEventListener("click", () => setMicEnabled(!state.micEnabled));
 
-  document.querySelector("#cameraBtn").addEventListener("click", () => {
-    state.cameraEnabled = !state.cameraEnabled;
-    state.localStream?.getVideoTracks().forEach((track) => {
-      track.enabled = state.cameraEnabled;
-    });
-    const button = document.querySelector("#cameraBtn");
-    button.classList.toggle("active", state.cameraEnabled);
-    button.innerHTML = state.cameraEnabled ? icons.camera : icons.cameraOff;
-    makeTile(state.peerId, state.name || "Bạn", state.localStream, true, state.avatar);
-  });
+  document.querySelector("#cameraBtn").addEventListener("click", () => setCameraEnabled(!state.cameraEnabled));
 
   document.querySelector("#screenBtn").addEventListener("click", toggleScreenShare);
   window.addEventListener("beforeunload", () => {
@@ -549,6 +753,14 @@ async function sendHostControl(action, target = "") {
       state.pendingRequests.delete(target);
       renderHostPanel();
     }
+    const messages = {
+      "request-audio": "Đã gửi yêu cầu bật mic.",
+      "request-video": "Đã gửi yêu cầu bật camera.",
+      "mute-audio": "Đã gửi yêu cầu tắt mic.",
+      "mute-video": "Đã gửi yêu cầu tắt camera.",
+      kick: "Đã mời người tham gia ra khỏi phòng."
+    };
+    if (messages[action]) toast(messages[action]);
   } catch (error) {
     toast(error.message);
   }
@@ -576,16 +788,33 @@ function stopScreenShare() {
   state.screenStream?.getTracks().forEach((track) => track.stop());
   state.screenStream = null;
   const cameraTrack = state.localStream?.getVideoTracks()[0];
-  if (cameraTrack) replaceVideoTrack(cameraTrack);
-  makeTile(state.peerId, state.name || "Bạn", state.localStream, true, state.avatar);
+  if (cameraTrack && state.cameraEnabled) replaceVideoTrack(cameraTrack);
+  else replaceVideoTrack(null);
+  updateLocalTile();
   state.sharingScreen = false;
   document.querySelector("#screenBtn").classList.remove("active");
 }
 
 function replaceVideoTrack(track) {
-  for (const pc of state.peerConnections.values()) {
-    const sender = pc.getSenders().find((item) => item.track?.kind === "video");
-    if (sender) sender.replaceTrack(track);
+  for (const [peerId, pc] of state.peerConnections.entries()) {
+    if (pc.connectionState === "closed") continue;
+    const sender = findSender(pc, "video");
+    const stream = state.screenStream?.getTracks().includes(track) ? state.screenStream : ensureLocalStream();
+    if (sender) {
+      const hadTrack = Boolean(sender.track);
+      sender.replaceTrack(track).then(() => {
+        if (track && !hadTrack) queueNegotiation(peerId, pc);
+      }).catch(() => {
+        if (!track) return;
+        try {
+          pc.addTrack(track, stream);
+          queueNegotiation(peerId, pc);
+        } catch {}
+      });
+    } else if (track) {
+      pc.addTrack(track, stream);
+      queueNegotiation(peerId, pc);
+    }
   }
 }
 
@@ -621,6 +850,7 @@ function createPeerConnection(peerId, initiator = false) {
 }
 
 async function negotiateOffer(peerId, pc) {
+  if (pc.signalingState !== "stable") return;
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
   await sendSignal(peerId, { type: "offer", description: pc.localDescription });
@@ -756,6 +986,8 @@ async function handleHostControl(action) {
     state.localStream?.getTracks().forEach((track) => track.stop());
     state.screenStream?.getTracks().forEach((track) => track.stop());
     state.peerConnections.forEach((pc) => pc.close());
+    state.negotiationTimers.forEach((timer) => window.clearTimeout(timer));
+    state.negotiationTimers.clear();
     window.setTimeout(() => {
       window.location.href = "/";
     }, 900);
@@ -763,30 +995,31 @@ async function handleHostControl(action) {
   }
 
   if (action === "mute-audio") {
-    state.micEnabled = false;
-    state.localStream?.getAudioTracks().forEach((track) => {
-      track.enabled = false;
-    });
-    const button = document.querySelector("#micBtn");
-    if (button) {
-      button.classList.remove("active");
-      button.innerHTML = icons.micOff;
-    }
+    await setMicEnabled(false);
     toast("Host đã yêu cầu tắt mic của bạn.");
   }
 
   if (action === "mute-video") {
-    state.cameraEnabled = false;
-    state.localStream?.getVideoTracks().forEach((track) => {
-      track.enabled = false;
-    });
-    const button = document.querySelector("#cameraBtn");
-    if (button) {
-      button.classList.remove("active");
-      button.innerHTML = icons.cameraOff;
-    }
-    makeTile(state.peerId, state.name || "Bạn", state.localStream, true, state.avatar);
+    await setCameraEnabled(false, { stopScreen: true });
     toast("Host đã yêu cầu tắt camera của bạn.");
+  }
+
+  if (action === "request-audio") {
+    if (!window.confirm("Host yêu cầu bật mic. Bạn có đồng ý không?")) {
+      toast("Bạn đã giữ mic tắt.");
+      return;
+    }
+    await setMicEnabled(true);
+    if (state.micEnabled) toast("Mic đã bật theo yêu cầu của host.");
+  }
+
+  if (action === "request-video") {
+    if (!window.confirm("Host yêu cầu bật camera. Bạn có đồng ý không?")) {
+      toast("Bạn đã giữ camera tắt.");
+      return;
+    }
+    await setCameraEnabled(true);
+    if (state.cameraEnabled) toast("Camera đã bật theo yêu cầu của host.");
   }
 }
 
@@ -848,6 +1081,9 @@ function appendChatMessage(message) {
 
 function removePeer(peerId) {
   state.peers.delete(peerId);
+  const timer = state.negotiationTimers.get(peerId);
+  if (timer) window.clearTimeout(timer);
+  state.negotiationTimers.delete(peerId);
   const pc = state.peerConnections.get(peerId);
   pc?.close();
   state.peerConnections.delete(peerId);
@@ -860,6 +1096,8 @@ async function leaveRoom() {
   state.localStream?.getTracks().forEach((track) => track.stop());
   state.screenStream?.getTracks().forEach((track) => track.stop());
   state.peerConnections.forEach((pc) => pc.close());
+  state.negotiationTimers.forEach((timer) => window.clearTimeout(timer));
+  state.negotiationTimers.clear();
   await request(`/api/rooms/${state.roomId}/leave`, {
     method: "POST",
     body: JSON.stringify({ peerId: state.peerId, token: state.peerToken })

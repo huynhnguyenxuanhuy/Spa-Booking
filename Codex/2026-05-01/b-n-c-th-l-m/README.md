@@ -10,7 +10,7 @@ HuyDebug là một MVP gọi video kiểu Google Meet/Zoom, dùng WebRTC để g
 - Copy link mời vào phòng.
 - Chat trong phòng theo thời gian thực.
 - Tải ảnh đại diện, lưu trong trình duyệt và hiển thị trong phòng.
-- Host controls: khóa/mở phòng, duyệt người chờ, kick người tham gia, yêu cầu tắt mic/camera.
+- Host controls: khóa/mở phòng, duyệt người chờ, kick người tham gia, yêu cầu tắt mic/camera và gửi yêu cầu bật mic/camera có xác nhận ở máy người nhận.
 
 ## Bảo mật
 
