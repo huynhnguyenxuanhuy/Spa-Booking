@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 const root = fileURLToPath(new URL(".", import.meta.url));
 const sourceDir = join(root, "public");
 const distDir = join(root, "public-dist");
-const version = "secure-3";
+const version = "secure-4";
 
 function compactLines(source) {
   return source

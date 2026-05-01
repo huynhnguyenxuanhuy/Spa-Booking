@@ -12,6 +12,7 @@ const state = {
   lastEventId: 0,
   peers: new Map(),
   peerConnections: new Map(),
+  remoteStreams: new Map(),
   negotiationTimers: new Map(),
   pendingIce: new Map(),
   chatMessages: [],
@@ -34,7 +35,13 @@ let iceServers = [
 ];
 
 const AUDIO_CONSTRAINTS = { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
-const VIDEO_CONSTRAINTS = { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" };
+const VIDEO_CONSTRAINTS = {
+  width: { ideal: 640, max: 960 },
+  height: { ideal: 360, max: 540 },
+  frameRate: { ideal: 20, max: 24 },
+  facingMode: "user"
+};
+const VIDEO_MAX_BITRATE = 700_000;
 
 function getRoomFromPath() {
   const match = window.location.pathname.match(/^\/r\/([A-Za-z0-9-]+)/);
@@ -319,10 +326,21 @@ function makeTile(id, name, stream, isLocal = false, avatarImage = "") {
   const avatar = tile.querySelector(".avatar");
   const tileName = tile.querySelector(".tile-name");
   const badge = tile.querySelector(".tile-badge");
+  video.autoplay = true;
+  video.playsInline = true;
+  video.muted = isLocal;
   video.srcObject = stream || null;
   setAvatarNode(avatar, name, avatarImage);
   tileName.textContent = `${name}${isLocal ? " (Bạn)" : ""}`;
   badge.textContent = isLocal ? "Local" : "Live";
+  if (stream) {
+    video.play().catch(() => {
+      badge.textContent = "Bấm để phát";
+    });
+  }
+  video.onclick = () => {
+    video.play().catch(() => {});
+  };
   tile.classList.toggle("no-video", !stream || !stream.getVideoTracks().some((track) => track.enabled));
   return tile;
 }
@@ -615,17 +633,22 @@ function syncLocalTrackWithPeerConnections(track) {
     if (pc.connectionState === "closed") continue;
     const sender = findSender(pc, track.kind);
     if (sender) {
+      const transceiver = pc.getTransceivers?.().find((item) => item.sender === sender);
+      if (transceiver && transceiver.direction !== "sendrecv") transceiver.direction = "sendrecv";
       const hadTrack = Boolean(sender.track);
       sender.replaceTrack(track).then(() => {
+        if (track.kind === "video") tuneVideoSender(sender);
         if (!hadTrack) queueNegotiation(peerId, pc);
       }).catch(() => {
         try {
-          pc.addTrack(track, stream);
+          const newSender = pc.addTrack(track, stream);
+          if (track.kind === "video") tuneVideoSender(newSender);
           queueNegotiation(peerId, pc);
         } catch {}
       });
     } else {
-      pc.addTrack(track, stream);
+      const newSender = pc.addTrack(track, stream);
+      if (track.kind === "video") tuneVideoSender(newSender);
       queueNegotiation(peerId, pc);
     }
   }
@@ -634,8 +657,17 @@ function syncLocalTrackWithPeerConnections(track) {
 function findSender(pc, kind) {
   const activeSender = pc.getSenders().find((sender) => sender.track?.kind === kind);
   if (activeSender) return activeSender;
-  const transceiver = pc.getTransceivers?.().find((item) => item.receiver?.track?.kind === kind);
+  const transceiver = pc.getTransceivers?.().find((item) => item.receiver?.track?.kind === kind || item.sender?.track?.kind === kind);
   return transceiver?.sender || null;
+}
+
+function tuneVideoSender(sender) {
+  if (!sender?.getParameters || !sender.setParameters) return;
+  const parameters = sender.getParameters();
+  parameters.encodings = parameters.encodings?.length ? parameters.encodings : [{}];
+  parameters.encodings[0].maxBitrate = VIDEO_MAX_BITRATE;
+  parameters.encodings[0].maxFramerate = 24;
+  sender.setParameters(parameters).catch(() => {});
 }
 
 function queueNegotiation(peerId, pc) {
@@ -801,18 +833,23 @@ function replaceVideoTrack(track) {
     const sender = findSender(pc, "video");
     const stream = state.screenStream?.getTracks().includes(track) ? state.screenStream : ensureLocalStream();
     if (sender) {
+      const transceiver = pc.getTransceivers?.().find((item) => item.sender === sender);
+      if (transceiver && track && transceiver.direction !== "sendrecv") transceiver.direction = "sendrecv";
       const hadTrack = Boolean(sender.track);
       sender.replaceTrack(track).then(() => {
+        if (track) tuneVideoSender(sender);
         if (track && !hadTrack) queueNegotiation(peerId, pc);
       }).catch(() => {
         if (!track) return;
         try {
-          pc.addTrack(track, stream);
+          const newSender = pc.addTrack(track, stream);
+          tuneVideoSender(newSender);
           queueNegotiation(peerId, pc);
         } catch {}
       });
     } else if (track) {
-      pc.addTrack(track, stream);
+      const newSender = pc.addTrack(track, stream);
+      tuneVideoSender(newSender);
       queueNegotiation(peerId, pc);
     }
   }
@@ -823,11 +860,24 @@ function createPeerConnection(peerId, initiator = false) {
   const pc = new RTCPeerConnection({ iceServers });
   state.peerConnections.set(peerId, pc);
 
-  state.localStream?.getTracks().forEach((track) => pc.addTrack(track, state.localStream));
+  state.localStream?.getTracks().forEach((track) => {
+    const sender = pc.addTrack(track, state.localStream);
+    if (track.kind === "video") tuneVideoSender(sender);
+  });
 
   pc.addEventListener("track", (event) => {
     const peer = state.peers.get(peerId) || { name: "Khach moi" };
-    makeTile(peerId, peer.name, event.streams[0], false, peer.avatar);
+    const stream = event.streams[0] || state.remoteStreams.get(peerId) || new MediaStream();
+    if (!event.streams[0] && !stream.getTracks().includes(event.track)) stream.addTrack(event.track);
+    state.remoteStreams.set(peerId, stream);
+    makeTile(peerId, peer.name, stream, false, peer.avatar);
+    event.track.addEventListener("unmute", () => {
+      makeTile(peerId, peer.name, stream, false, peer.avatar);
+    });
+    event.track.addEventListener("ended", () => {
+      stream.removeTrack(event.track);
+      makeTile(peerId, peer.name, stream, false, peer.avatar);
+    }, { once: true });
   });
 
   pc.addEventListener("icecandidate", (event) => {
@@ -1087,6 +1137,7 @@ function removePeer(peerId) {
   const pc = state.peerConnections.get(peerId);
   pc?.close();
   state.peerConnections.delete(peerId);
+  state.remoteStreams.delete(peerId);
   document.querySelector(`[data-peer="${CSS.escape(peerId)}"]`)?.remove();
   updateMemberCount();
 }
