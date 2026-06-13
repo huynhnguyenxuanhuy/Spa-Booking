@@ -1,0 +1,8 @@
+{
+  "name": "memory-3d-room-game",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@upstash/redis": "^1.38.0"
+  }
+}
