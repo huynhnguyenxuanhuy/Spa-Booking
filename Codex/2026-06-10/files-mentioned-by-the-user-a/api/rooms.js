@@ -19,10 +19,13 @@ function roomKey(code) {
 }
 
 function getRedis() {
-  if (!process.env.UPSTASH_REDIS_REST_URL || !process.env.UPSTASH_REDIS_REST_TOKEN) {
-    throw new Error("Missing Upstash Redis environment variables");
+  const url = process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL;
+  const token = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN;
+
+  if (!url || !token) {
+    throw new Error("Missing Redis environment variables");
   }
-  return Redis.fromEnv();
+  return new Redis({ url, token });
 }
 
 function parseRoom(value) {
